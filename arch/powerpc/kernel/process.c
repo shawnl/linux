@@ -267,6 +267,29 @@ static int restore_fp(struct task_struct *tsk) { return 0; }
 #ifdef CONFIG_ALTIVEC
 #define loadvec(thr) ((thr).load_vec)
 
+/*
+ * Track whether the kernel is using the SIMD state
+ * currently.
+ *
+ * This flag is used:
+ *
+ *   - by IRQ context code to potentially use the FPU
+ *     if it's unused.
+ *
+ *   - to debug kernel_altivec/vsx_begin()/end() correctness
+ */
+static DEFINE_PER_CPU(bool, in_kernel_simd);
+
+static bool kernel_simd_disabled(void)
+{
+	return this_cpu_read(in_kernel_simd);
+}
+
+static bool interrupted_kernel_simd_idle(void)
+{
+	return !kernel_simd_disabled();
+}
+
 static void __giveup_altivec(struct task_struct *tsk)
 {
 	unsigned long msr;
@@ -295,7 +318,8 @@ void enable_kernel_altivec(void)
 {
 	unsigned long cpumsr;
 
-	WARN_ON(preemptible());
+	WARN_ON_ONCE(this_cpu_read(in_kernel_simd));
+	this_cpu_write(in_kernel_simd, true);
 
 	cpumsr = msr_check_and_set(MSR_VEC);
 
@@ -315,6 +339,14 @@ void enable_kernel_altivec(void)
 	}
 }
 EXPORT_SYMBOL(enable_kernel_altivec);
+
+extern void disable_kernel_altivec(void)
+{
+	WARN_ON_FPU(!this_cpu_read(in_kernel_simd));
+	this_cpu_write(in_kernel_simd, false);
+	msr_check_and_clear(MSR_VEC);
+}
+EXPORT_SYMBOL(disable_kernel_altivec);
 
 /*
  * Make sure the VMX/Altivec register state in the
@@ -346,6 +378,16 @@ static int restore_altivec(struct task_struct *tsk)
 	return 0;
 }
 
+static bool kernel_simd_disabled(void)
+{
+	return this_cpu_read(in_kernel_simd);
+}
+
+static bool interrupted_kernel_simd_idle(void)
+{
+	return !kernel_simd_disabled();
+}
+
 /*
  * Were we in user mode when we were
  * interrupted?
@@ -370,7 +412,8 @@ static bool interrupted_user_mode(void)
 bool irq_simd_usable(void)
 {
 	return !in_interrupt() ||
-		interrupted_user_mode();
+		interrupted_user_mode() ||
+		interrupted_kernel_simd_idle();
 }
 EXPORT_SYMBOL(irq_simd_usable);
 
@@ -410,7 +453,8 @@ void enable_kernel_vsx(void)
 {
 	unsigned long cpumsr;
 
-	WARN_ON(preemptible());
+	WARN_ON_ONCE(this_cpu_read(in_kernel_simd));
+	this_cpu_write(in_kernel_simd, true);
 
 	cpumsr = msr_check_and_set(MSR_FP|MSR_VEC|MSR_VSX);
 
@@ -431,6 +475,14 @@ void enable_kernel_vsx(void)
 	}
 }
 EXPORT_SYMBOL(enable_kernel_vsx);
+
+void disable_kernel_vsx(void)
+{
+	WARN_ON_ONCE(!this_cpu_read(in_kernel_simd));
+	this_cpu_write(in_kernel_simd, false);
+	msr_check_and_clear(MSR_FP|MSR_VEC|MSR_VSX);
+}
+EXPORT_SYMBOL(disable_kernel_vsx);
 
 void flush_vsx_to_thread(struct task_struct *tsk)
 {
